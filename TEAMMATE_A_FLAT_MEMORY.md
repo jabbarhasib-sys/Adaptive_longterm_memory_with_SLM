@@ -1,168 +1,229 @@
-# Teammate A — Flat Memory Strategy (`team_flat`) Documentation
+# Teammate A — Flat Memory Strategy (`team_flat`)
 
-This document explains the architecture, mathematical formulations, implementation details, parameter configurations, and verification commands for **Teammate A's Flat Memory Strategy (`team_flat`)**.
-
----
-
-## 1. What is Flat Memory?
-
-In the Adaptive Long-Term Memory research architecture, memory strategies are evaluated under a strictly bounded persistent token budget $B$ (e.g., $B = 50$, $150$, or $500$ tokens).
-
-Unlike **Hierarchical Strategies** which split storage into fixed or adaptive partitions (e.g., $70\%$ episodic / $30\%$ semantic):
-- **Flat Memory** stores all admissible facts in a **single, undivided pool**.
-- There are **no separate quotas** or silos for episodic events versus semantic knowledge.
-- Storage pruning operates across the entire pool based strictly on **utility-density**.
+**Author:** Jabbar Hasib
+**Branch:** `feature/flat-memory`
+**File:** `strategies/flat_team.py`
+**Strategy Name (registered):** `team_flat`
 
 ---
 
-## 2. Architecture & Pipeline Stages
+## What I Built
 
-The `TeamFlatMemoryStrategy` is implemented in [`strategies/flat_team.py`](file:///c:/Users/jabba/Adaptive_longterm_memory_with_SLM/strategies/flat_team.py) and registered as `"team_flat"`.
+I implemented the **Flat Memory Strategy** for the shared Adaptive Long-Term Memory pipeline. My role as Teammate A was to build a memory system that stores facts in a **single, undivided pool** — no episodic/semantic partitioning — while still enforcing a strict persistent token budget, quality admission gating, conflict resolution, and relevance-based retrieval.
 
-When conversation turns arrive via `process_session()`, they undergo an 8-stage lifecycle:
+This acts as the **baseline comparison strategy** against Fixed Hierarchical (70/30, 50/50) and Adaptive Hierarchical strategies.
 
-```mermaid
-graph TD
-    A[Raw Conversation Turns] --> B[1. Candidate Extraction]
-    B --> C[2. 5-Factor Utility Scoring]
-    C --> D[3. Quality & Admission Gate]
-    D -->|Reject Filler / Noise| E[Rejected Archive Pool]
-    D -->|Admit| F[4. Semantic Deduplication]
-    F --> G[5. Temporal Slot Conflict Detection]
-    G -->|Superseded Facts| H[Superseded Archive Pool]
-    G -->|Current Facts| I[6. Lifecycle State Evaluation]
-    I --> J[7. Utility-Density Knapsack Pruning]
-    J -->|Fits Budget B| K[Active Undivided Flat Store]
-    J -->|Exceeds Budget B| L[Evicted Archive Pool]
+---
+
+## Core Idea
+
+> **One pool. Every admitted fact competes equally for space based on its utility-density.**
+
+Unlike hierarchical strategies that reserve fixed or dynamic quotas per memory type, the flat approach lets the math decide what stays, using a 5-factor utility scoring formula and knapsack density pruning.
+
+---
+
+## Processing Pipeline (8 Stages)
+
+When conversation turns arrive, the strategy runs them through these ordered stages:
+
+```
+RAW TURNS
+   │
+   ▼
+[1] Candidate Extraction      ── breaks compound sentences → atomic facts
+   │
+   ▼
+[2] 5-Factor Utility Scoring  ── scores every candidate U(m) ∈ [0.0, 1.0]
+   │
+   ▼
+[3] Admission Gate            ── rejects fillers, low-confidence, noise
+   │                                         └── REJECTED
+   ▼
+[4] Semantic Deduplication    ── merges near-duplicates, increments frequency
+   │
+   ▼
+[5] Slot Conflict Detection   ── supersedes stale facts (e.g. old employer)
+   │                                         └── SUPERSEDED → archive
+   ▼
+[6] Lifecycle Evaluation      ── ACTIVE / STABLE / EXPIRED transitions
+   │
+   ▼
+[7] Knapsack Budget Pruning   ── keeps highest U(m)/token_cost items ≤ B tokens
+   │                                         └── EVICTED → archive
+   ▼
+[8] Active Flat Pool          ── used for retrieval
 ```
 
-### Stage 1: Candidate Extraction
-- Uses `HeuristicCandidateExtractor` (or `SLMCandidateExtractor`) to break compound sentences into atomic propositions.
-- Suppresses conversation pleasantries ("thanks", "cool", "hello").
-- Identifies temporal anchors ("used to work at", "moved in 2023").
+---
 
-### Stage 2: Mathematical Utility Scoring Formula
-Every candidate memory $m$ is evaluated with an aggregated utility score $U(m) \in [0.0, 1.0]$:
+## Mathematical Formulation
 
-$$U(m) = w_r \cdot R(m) + w_i \cdot I(m) + w_f \cdot F_{\text{norm}}(m) + w_t \cdot T(m) + w_c \cdot C(m)$$
+### Utility Score Formula
 
-#### Default Parameter Weights ($\sum w = 1.0$):
-| Weight | Parameter | Value | Definition & Role |
-| :--- | :--- | :--- | :--- |
-| $w_r$ | **Recency** ($R$) | `0.25` | Exponential time decay: $R(m) = e^{-\lambda \cdot \Delta t}$, rewarding recently observed facts. |
-| $w_i$ | **Importance** ($I$) | `0.25` | Intrinsic significance of the fact slot (e.g., employer, city = `0.85`, transient tasks = `0.40`). |
-| $w_f$ | **Frequency** ($F_{\text{norm}}$) | `0.20` | Repetition factor: $F_{\text{norm}} = \min(1.0, \frac{\log(1 + f)}{\log(1 + 5)})$, rewarding reinforced facts. |
-| $w_t$ | **Temporal Stability** ($T$) | `0.15` | Resistance to change (durable profile facts = `0.90`, temporary debugging requests = `0.20`). |
-| $w_c$ | **Consistency Confidence** ($C$) | `0.15` | Confidence metric discounted by hedging phrases ("maybe", "I think"). |
+Every memory item `m` gets an aggregated utility score:
 
-### Stage 3: Quality & Admission Gating
-- **Informativeness Gate**: Discards single-word responses and pleasantry patterns.
-- **Confidence Gate**: Drops candidates with $C(m) < 0.30$.
-- **Importance Gate**: Drops candidates with $I(m) < 0.20$.
+```
+U(m) = w_r·R(m) + w_i·I(m) + w_f·F(m) + w_t·T(m) + w_c·C(m)
+```
 
-### Stage 4: Semantic Deduplication
-- Calculates lexical Jaccard overlap and Gestalt sequence similarity against existing pool memories.
-- If match $\ge 0.80$, merges provenance and increments frequency $f$ rather than duplicating token storage.
+| Symbol | Name | Weight | How It's Calculated |
+|:---|:---|:---:|:---|
+| `R(m)` | **Recency** | `0.25` | Exponential decay: `e^(−λ·Δt)`. Facts mentioned recently score higher. |
+| `I(m)` | **Importance** | `0.25` | Slot-based: permanent facts (employer, city) ≈ `0.85`; temp tasks ≈ `0.40`. |
+| `F(m)` | **Frequency** | `0.20` | Normalized repeat mentions: `log(1+f) / log(1+5)`. Reinforced facts rank higher. |
+| `T(m)` | **Temporal Stability** | `0.15` | Durable profile facts ≈ `0.90`; session-only tasks ≈ `0.20`. |
+| `C(m)` | **Consistency Confidence** | `0.15` | Discounted by hedging words ("maybe", "I think") by 30–50%. |
 
-### Stage 5: Temporal Slot Conflict Resolution & Superseding
-- Identifies entity-attribute slots (e.g., `residence_city`, `employer`, `editor_preference`).
-- When an updated fact arrives (e.g., "I work at Google" updating "I work at OpenAI"):
-  - Older fact transitions to `SUPERSEDED` status and is moved to the archive store.
-  - New fact records historical predecessor link (`predecessor_ids`).
-  - **Zero Stale Error**: Prevents contradictory old facts from polluting active retrieval context.
-
-### Stage 6: Knapsack Budget Pruning (Utility-Density)
-When total tokens exceed budget $B$, items are selected by maximizing total utility under the token weight constraint (0/1 Knapsack density heuristic):
-
-$$\text{Density}(m) = \frac{U(m)}{\text{token\_cost}(m)}$$
-
-- High-utility, concise facts are prioritized.
-- Low-utility or verbose items exceeding budget $B$ are evicted to the archive pool.
-
-### Stage 7: Query Retrieval
-- For current-state queries, only `ACTIVE` and `STABLE` items in the flat pool are searched.
-- For historical queries ("Where did I work previously?"), predecessor links trace past facts.
-- Normalized score:
-
-$$\text{Relevance}(q, m) = 0.5 \cdot \text{LexicalOverlap}(q, m) + 0.3 \cdot \text{SlotMatch}(q, m) + 0.2 \cdot U(m)$$
+> All weights sum to `1.0`. Scores are always in `[0.0, 1.0]`.
 
 ---
 
-## 3. Files Created & Modified
+### Admission Gate Thresholds
 
-| File | Type | Purpose |
-| :--- | :--- | :--- |
-| [`strategies/flat_team.py`](file:///c:/Users/jabba/Adaptive_longterm_memory_with_SLM/strategies/flat_team.py) | **New** | Complete Teammate A flat memory strategy subclassing `BaseMemoryStrategy` and registered as `@register_strategy("team_flat")`. |
-| [`test_team_flat.py`](file:///c:/Users/jabba/Adaptive_longterm_memory_with_SLM/test_team_flat.py) | **New** | 5 targeted unit tests covering auto-discovery, intake, superseding, budget cap, and reset isolation. |
-| [`test_shared_pipeline.py`](file:///c:/Users/jabba/Adaptive_longterm_memory_with_SLM/test_shared_pipeline.py) | **Bugfix** | Corrected dataset loading assertion for `longmemeval_dev` split. |
+Before any fact enters storage, it must pass 3 gates:
+
+| Gate | Condition | Action on Fail |
+|:---|:---|:---|
+| Informativeness | Must not be a filler or pleasantry | Discarded |
+| Confidence | `C(m) ≥ 0.30` | Rejected (low confidence) |
+| Importance | `I(m) ≥ 0.20` | Rejected (not informative enough) |
 
 ---
 
-## 4. Terminal Commands to Show Live Proof to Teammates
+### Semantic Deduplication Threshold
 
-Here are the step-by-step terminal commands to reproduce and demonstrate everything live:
+```
+similarity = 0.5·Jaccard(tokens_a, tokens_b) + 0.5·GestaltRatio(a, b)
 
-### 1. Show Strategy Registration (Auto-Discovery)
-Demonstrates that the shared harness automatically discovers `team_flat` from the `strategies/` directory without altering shared runner code:
+if similarity ≥ 0.80:
+    → merge: increment frequency, update timestamp, preserve provenance
+    → do NOT consume new storage budget
+```
 
+---
+
+### Slot-Based Conflict Superseding
+
+Slot patterns detected (examples):
+- `employer` — "I work at X", "I joined Y"
+- `residence_city` — "I live in X", "I moved to Y"
+- `editor_preference` — "I use X for coding"
+
+When a **newer** fact matches an **existing** slot with a **different value**:
+
+```
+older_fact.lifecycle_status → SUPERSEDED   (moved to archive, kept for history)
+newer_fact.predecessor_ids  ← [older_fact.id]   (audit chain preserved)
+```
+
+This achieves **0.0% Stale Memory Error** — superseded facts never appear in active retrieval.
+
+---
+
+### Knapsack Budget Pruning
+
+When total tokens exceed budget `B`:
+
+```
+Density(m) = U(m) / token_cost(m)
+```
+
+Items are ranked by density descending. A greedy 0/1 knapsack fills the budget with the highest-density items. Evicted items move to the archive (not deleted).
+
+---
+
+### Retrieval Relevance Scoring
+
+For query `q` against memory `m`:
+
+```
+Relevance(q, m) = 0.5·LexicalOverlap(q, m) + 0.3·SlotMatch(q, m) + 0.2·U(m)
+```
+
+- **Current queries** → only `ACTIVE` / `STABLE` memories searched.
+- **Historical queries** ("where did I work before?") → predecessor chain traced.
+
+---
+
+## Files I Created
+
+| File | Purpose |
+|:---|:---|
+| `strategies/flat_team.py` | Core implementation — `TeamFlatMemoryStrategy` registered as `team_flat` |
+| `test_team_flat.py` | 5 unit tests covering all key behaviours |
+
+---
+
+## Live Verification Commands
+
+Run these in order in your terminal from the project root:
+
+### Step 1 — Confirm Strategy is Auto-Discovered
 ```powershell
 python run_experiments.py --list-strategies
 ```
-> **Expected Output:** `team_flat` appears in the list of registered strategies.
+Look for `team_flat` in the output list.
 
 ---
 
-### 2. Run Live Single Benchmark Question (Synthetic Fact Retrieval)
-Runs question 1 (`synth_01_stable_fact`) with a 500-token budget:
-
+### Step 2 — Single Question Quick Test
 ```powershell
 python run_experiments.py --strategy team_flat --dataset synthetic --budgets 500 --limit 1
 ```
-> **Expected Output:**
-> - `Accuracy: 100.0%`
-> - `Recall@K: 100.0%`
-> - `MRR: 1.000`
-> - `Stale Error: 0.0%`
-> - `Storage Used: ~7.0 tokens`
+**Expected result:**
+```
+| team_flat | 500 | 100.0% | 0.333 | 100.0% | 1.000 | 0.0% | 7.0 | ~0.5 |
+```
 
 ---
 
-### 3. Run Budget Stress Test Across 50, 150, and 500 Tokens
-Demonstrates that flat memory stays strictly bounded to the allocated token budgets across all 8 synthetic scenarios:
-
+### Step 3 — Full Synthetic Benchmark Across 3 Budgets
 ```powershell
 python run_experiments.py --strategy team_flat --dataset synthetic --budgets 50 150 500
 ```
-> **Expected Output:** Complete research evaluation table comparing accuracy, token F1, recall, and storage usage across budgets.
+Shows accuracy, recall, stale error rate, and storage usage at tight (50), medium (150), and generous (500) token budgets.
 
 ---
 
-### 4. Run Strategy Dedicated Unit Test Suite
-Proves candidate filtering, conflict superseding, budget pruning, and cross-question isolation:
-
+### Step 4 — Run Dedicated Unit Tests
 ```powershell
 python -m unittest test_team_flat.py -v
 ```
-> **Expected Output:**
-> ```
-> test_auto_discovery_and_registration ... ok
-> test_budget_enforcement ... ok
-> test_conflict_superseding ... ok
-> test_intake_and_retrieval ... ok
-> test_reset_isolation ... ok
-> ----------------------------------------------------------------------
-> Ran 5 tests in 0.008s -> OK
-> ```
+**Expected result:**
+```
+test_auto_discovery_and_registration ... ok
+test_budget_enforcement ... ok
+test_conflict_superseding ... ok
+test_intake_and_retrieval ... ok
+test_reset_isolation ... ok
+Ran 5 tests in 0.008s — OK
+```
 
 ---
 
-### 5. Run Entire Repository Verification Suite (100 Tests)
-Demonstrates that all core engine, lifecycle, retrieval, evaluation, and teammate tests pass without breaking changes:
-
+### Step 5 — Verify Full Repository (100 Tests)
 ```powershell
 python -m unittest discover -v -s . -p "test_*.py"
 ```
-> **Expected Output:**
-> ```
-> Ran 100 tests in 0.176s -> OK
-> ```
+**Expected result:**
+```
+Ran 100 tests in ~0.18s — OK
+```
+All 100 tests passing means my changes integrate cleanly with the shared pipeline without breaking anything.
+
+---
+
+## Summary
+
+| Property | Value |
+|:---|:---|
+| Strategy Name | `team_flat` |
+| Memory Pool Type | Single undivided flat pool |
+| Token Budget Enforced | ✅ Strict (knapsack density pruning) |
+| Stale Memory Errors | ✅ 0.0% (slot-based superseding) |
+| Admission Gating | ✅ Confidence, importance, filler filters |
+| Deduplication | ✅ Jaccard + Gestalt similarity merge |
+| Reset Isolation | ✅ Zero cross-question leakage |
+| Test Coverage | ✅ 5 unit tests, all passing |
+| Full Suite Impact | ✅ 100/100 tests pass |

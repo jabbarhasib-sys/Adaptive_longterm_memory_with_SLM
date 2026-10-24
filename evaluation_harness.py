@@ -37,8 +37,18 @@ from model_adapter import BaseLLMAdapter, heuristic_bpe_token_count
 # 1. Metric Calculations
 # ============================================================================
 
-def normalize_text(text: str) -> str:
-    """Lowercases, removes punctuation and redundant whitespace."""
+def normalize_text(text: Any) -> str:
+    """
+    Lowercases, removes punctuation and redundant whitespace.
+
+    Coerces non-string inputs (int, float, None, bool) to their string form
+    so LongMemEval answers parsed as JSON integers (e.g. 42) or floats
+    do not crash the evaluation harness.
+    """
+    if text is None:
+        return ""
+    if not isinstance(text, str):
+        text = str(text)
     text = text.lower()
     text = re.sub(r"[^\w\s]", " ", text)
     return " ".join(text.split())

@@ -383,7 +383,13 @@ def select_memories(
 ) -> Tuple[List[MemoryItem], int]:
     """
     Selects candidate memories that fit within the store's budget without silently exceeding it.
-    Uses greedy knapsack heuristic ranking candidates by utility density: U(m) / token_cost(m).
+    Uses greedy knapsack heuristic ranking candidates by raw utility score U(m).
+
+    Note: ranking by utility/cost (density) was removed because it unfairly
+    penalises long, highly informative facts (token_cost≈23) in favour of
+    shorter, low-value snippets (token_cost≈10), causing factual recall failures.
+    Raw utility ranking correctly retains the highest-value memories regardless
+    of their character length.
 
     Returns:
         Tuple of (selected_memories, total_tokens_used)
@@ -391,10 +397,10 @@ def select_memories(
     if budget <= 0 or not memories:
         return [], 0
 
-    # Rank by utility density (utility per token), tie-broken by raw utility score
+    # Rank by raw utility score (descending), tie-broken by stability
     ranked = sorted(
         memories,
-        key=lambda m: (m.utility_score / max(1, m.token_cost), m.utility_score),
+        key=lambda m: (m.utility_score, m.stability),
         reverse=True
     )
 
@@ -408,6 +414,7 @@ def select_memories(
             used_tokens += cost
 
     return selected, used_tokens
+
 
 
 # ============================================================================

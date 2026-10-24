@@ -566,7 +566,7 @@ def parse_args():
     p.add_argument("--limit-train", type=int, default=None,
                    help="Cap train chats for fast debug (default: no cap)")
     p.add_argument("--skip-train", action="store_true",
-                   help="Skip calibration and use low_recency_high_importance params")
+                   help="Skip calibration and use the pre-calibrated best params (large_budget)")
     p.add_argument("--output-dir", default="outputs/train_test",
                    help="Output directory for JSON results")
     return p.parse_args()
@@ -585,10 +585,10 @@ def main():
     # Calibration phase
     if args.skip_train:
         best_params = next(
-            p for p in PARAM_GRID if p["label"] == "low_recency_high_importance"
+            p for p in PARAM_GRID if p["label"] == "large_budget"
         )
         grid_summaries = []
-        print(f"[skip-train] Using pre-selected params: {best_params['label']}")
+        print(f"[skip-train] Using pre-calibrated best params: {best_params['label']}")
     else:
         best_params, grid_summaries = run_calibration(
             train_items, top_k=args.top_k, limit=args.limit_train

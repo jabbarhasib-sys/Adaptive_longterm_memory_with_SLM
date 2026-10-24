@@ -424,7 +424,7 @@ def build_flat_memory_docx(output_path: str):
     doc.add_paragraph("Table 2: Final Held-Out Evaluation Metrics (30 Test Chats)", style='Caption')
     test_headers = ["Evaluation Parameter / Metric", "Value (team_flat)", "Interpretation & Significance"]
     test_rows = [
-        ["Recall@5", "0.4000", "Proportion of ground-truth evidence successfully retrieved in Top-5"],
+        ["Recall@5", "{recall_at_k}", "Proportion of ground-truth evidence successfully retrieved in Top-5"],
         ["Precision@5", "0.4000", "Fraction of retrieved memories that were relevant evidence"],
         ["Mean Reciprocal Rank (MRR)", "0.4000", "Position of the first relevant fact (avg hit rank = 2.5)"],
         ["Token F1 Score", "0.0381+", "Token overlap between predicted answer and ground truth"],
